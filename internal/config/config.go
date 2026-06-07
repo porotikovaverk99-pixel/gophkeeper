@@ -9,42 +9,45 @@ import (
 
 // ServerConfig описывает параметры запуска сервера.
 type ServerConfig struct {
-	RunAddr      string
-	LogLevel     string
-	DatabaseDSN  string
-	JWTSecret    string
-	JWTTokenTTL  time.Duration
+	RunAddr     string
+	LogLevel    string
+	DatabaseDSN string
+	JWTSecret   string
+	JWTTokenTTL time.Duration
 }
 
-// ParseServerFlags читает флаги и переменные окружения сервера.
+// ParseServerFlags читает конфигурацию сервера из переменных окружения и флагов.
+// Env задаёт значения по умолчанию, флаги командной строки их перезаписывают.
 func ParseServerFlags() ServerConfig {
+	return parseServerConfig(nil)
+}
+
+func parseServerConfig(args []string) ServerConfig {
 	var cfg ServerConfig
 	var tokenTTLHours int
 
-	flag.StringVar(&cfg.RunAddr, "a", ":8080", "address and port to run server")
-	flag.StringVar(&cfg.LogLevel, "l", "info", "log level")
-	flag.StringVar(&cfg.DatabaseDSN, "d", "", "database dsn")
-	flag.StringVar(&cfg.JWTSecret, "j", "", "jwt secret key")
-	flag.IntVar(&tokenTTLHours, "t", 24, "jwt token ttl in hours")
-	flag.Parse()
+	if args == nil {
+		args = os.Args[1:]
+	}
+
+	fs := flag.NewFlagSet("gophkeeper-server", flag.ContinueOnError)
+
+	fs.StringVar(&cfg.RunAddr, "a", envOrDefault("SERVER_ADDRESS", ":8080"), "address and port to run server")
+	fs.StringVar(&cfg.LogLevel, "l", envOrDefault("LOG_LEVEL", "info"), "log level")
+	fs.StringVar(&cfg.DatabaseDSN, "d", envOrDefault("DATABASE_DSN", ""), "database dsn")
+	fs.StringVar(&cfg.JWTSecret, "j", envOrDefault("JWT_SECRET", ""), "jwt secret key")
+	fs.IntVar(&tokenTTLHours, "t", 24, "jwt token ttl in hours")
+
+	_ = fs.Parse(args)
 
 	cfg.JWTTokenTTL = time.Duration(tokenTTLHours) * time.Hour
 
-	if value := os.Getenv("SERVER_ADDRESS"); value != "" {
-		cfg.RunAddr = value
-	}
-	if value := os.Getenv("LOG_LEVEL"); value != "" {
-		cfg.LogLevel = value
-	}
-	if value := os.Getenv("DATABASE_DSN"); value != "" {
-		cfg.DatabaseDSN = value
-	}
-	if value := os.Getenv("JWT_SECRET"); value != "" {
-		cfg.JWTSecret = value
-	}
-	if cfg.JWTSecret == "" {
-		cfg.JWTSecret = "gophkeeper-dev-secret"
-	}
-
 	return cfg
+}
+
+func envOrDefault(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }

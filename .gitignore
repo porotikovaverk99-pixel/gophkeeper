@@ -19,6 +19,7 @@ coverage.out
 
 # Old template artifacts
 iter10_changes.patch
+go
 
 # Dependency directories
 vendor/

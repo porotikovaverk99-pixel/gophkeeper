@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/porotikovaverk99-pixel/gophkeeper/internal/auth"
@@ -20,30 +24,35 @@ import (
 func main() {
 	cfg := config.ParseServerFlags()
 
-	if err := logger.Initialize(cfg.LogLevel); err != nil {
+	zlog, err := logger.New(cfg.LogLevel)
+	if err != nil {
 		log.Fatalf("failed to initialize logger: %v", err)
 	}
 	defer func() {
-		_ = logger.Log.Sync()
+		_ = zlog.Sync()
 	}()
 
 	if cfg.DatabaseDSN == "" {
-		logger.Log.Fatal("DATABASE_DSN is required")
+		zlog.Fatal("DATABASE_DSN is required")
+	}
+	if cfg.JWTSecret == "" {
+		zlog.Fatal("JWT_SECRET is required")
 	}
 
 	storage, err := repository.NewPostgresStorage(cfg.DatabaseDSN)
 	if err != nil {
-		logger.Log.Fatal("failed to initialize storage", zap.Error(err))
+		zlog.Fatal("failed to initialize storage", zap.Error(err))
 	}
+	defer storage.Close()
 
 	authManager := auth.NewManager(cfg.JWTSecret, cfg.JWTTokenTTL)
 	keeperService := service.NewKeeperService(storage, authManager)
-	keeperHandler := handler.NewKeeperHandler(keeperService)
+	keeperHandler := handler.NewKeeperHandler(keeperService, zlog)
 
 	httpServer := server.New(cfg.RunAddr)
 	router := httpServer.Router()
 	router.Use(func(next http.Handler) http.Handler {
-		return logger.RequestLogger(packgzip.GzipMiddleware(next))
+		return logger.RequestLogger(zlog, packgzip.GzipMiddleware(next))
 	})
 
 	router.Get("/ping", keeperHandler.Ping)
@@ -59,9 +68,14 @@ func main() {
 		r.Post("/api/v1/sync", keeperHandler.SyncEntries)
 	})
 
-	logger.Log.Info("running gophkeeper server", zap.String("address", cfg.RunAddr))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	if err := httpServer.Run(); err != nil {
-		logger.Log.Fatal("server stopped", zap.Error(err))
+	zlog.Info("running gophkeeper server", zap.String("address", cfg.RunAddr))
+
+	if err := httpServer.Run(ctx); err != nil {
+		zlog.Fatal("server stopped", zap.Error(err))
 	}
+
+	zlog.Info("server shutdown complete")
 }

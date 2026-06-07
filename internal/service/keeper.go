@@ -18,16 +18,22 @@ import (
 var (
 	// ErrInvalidCredentials возвращается при неверном логине или пароле.
 	ErrInvalidCredentials = errors.New("invalid credentials")
+	// ErrLoginPasswordRequired возвращается при пустом логине или пароле.
+	ErrLoginPasswordRequired = errors.New("login and password are required")
+	// ErrUserAlreadyExists возвращается при попытке повторной регистрации.
+	ErrUserAlreadyExists = errors.New("user already exists")
+	// ErrEntryNotFound возвращается, если запись не найдена.
+	ErrEntryNotFound = errors.New("entry not found")
 )
 
 // KeeperService реализует регистрацию, аутентификацию и CRUD для приватных данных.
 type KeeperService struct {
-	storage repository.Storage
+	storage Storage
 	auth    *auth.Manager
 }
 
 // NewKeeperService создаёт сервис GophKeeper.
-func NewKeeperService(storage repository.Storage, authManager *auth.Manager) *KeeperService {
+func NewKeeperService(storage Storage, authManager *auth.Manager) *KeeperService {
 	return &KeeperService{
 		storage: storage,
 		auth:    authManager,
@@ -37,7 +43,7 @@ func NewKeeperService(storage repository.Storage, authManager *auth.Manager) *Ke
 // Register создаёт нового пользователя и возвращает JWT-токен.
 func (s *KeeperService) Register(ctx context.Context, login, password string) (string, *model.User, error) {
 	if login == "" || password == "" {
-		return "", nil, fmt.Errorf("login and password are required")
+		return "", nil, ErrLoginPasswordRequired
 	}
 
 	hash, err := crypto.HashPassword(password)
@@ -47,6 +53,9 @@ func (s *KeeperService) Register(ctx context.Context, login, password string) (s
 
 	user, err := s.storage.CreateUser(ctx, login, hash)
 	if err != nil {
+		if errors.Is(err, repository.ErrUserAlreadyExists) {
+			return "", nil, ErrUserAlreadyExists
+		}
 		return "", nil, err
 	}
 
@@ -90,12 +99,19 @@ func (s *KeeperService) CreateEntry(ctx context.Context, userID uuid.UUID, entry
 // UpdateEntry обновляет существующую запись пользователя.
 func (s *KeeperService) UpdateEntry(ctx context.Context, userID uuid.UUID, entry *model.Entry) error {
 	entry.UserID = userID
-	return s.storage.UpdateEntry(ctx, entry)
+	if err := s.storage.UpdateEntry(ctx, entry); err != nil {
+		return mapStorageError(err)
+	}
+	return nil
 }
 
 // GetEntry возвращает запись пользователя по идентификатору.
 func (s *KeeperService) GetEntry(ctx context.Context, userID, entryID uuid.UUID) (*model.Entry, error) {
-	return s.storage.GetEntry(ctx, userID, entryID)
+	entry, err := s.storage.GetEntry(ctx, userID, entryID)
+	if err != nil {
+		return nil, mapStorageError(err)
+	}
+	return entry, nil
 }
 
 // SyncEntries возвращает все записи, изменённые после указанного времени.
@@ -105,7 +121,17 @@ func (s *KeeperService) SyncEntries(ctx context.Context, userID uuid.UUID, since
 
 // DeleteEntry удаляет запись пользователя.
 func (s *KeeperService) DeleteEntry(ctx context.Context, userID, entryID uuid.UUID) error {
-	return s.storage.DeleteEntry(ctx, userID, entryID)
+	if err := s.storage.DeleteEntry(ctx, userID, entryID); err != nil {
+		return mapStorageError(err)
+	}
+	return nil
+}
+
+func mapStorageError(err error) error {
+	if errors.Is(err, repository.ErrEntryNotFound) {
+		return ErrEntryNotFound
+	}
+	return err
 }
 
 // Ping проверяет доступность хранилища.

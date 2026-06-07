@@ -2,6 +2,7 @@
 package vault
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 
@@ -83,7 +84,7 @@ func (m *Manager) BuildEntry(entryType model.EntryType, metadata string, payload
 }
 
 func encodeSalt(salt []byte) string {
-	return fmt.Sprintf("%x", salt)
+	return hex.EncodeToString(salt)
 }
 
 func decodeSalt(encoded string) ([]byte, error) {
@@ -91,14 +92,5 @@ func decodeSalt(encoded string) ([]byte, error) {
 		return nil, fmt.Errorf("master salt is required")
 	}
 
-	salt := make([]byte, len(encoded)/2)
-	for i := 0; i < len(salt); i++ {
-		var b byte
-		if _, err := fmt.Sscanf(encoded[i*2:i*2+2], "%02x", &b); err != nil {
-			return nil, fmt.Errorf("decode salt: %w", err)
-		}
-		salt[i] = b
-	}
-
-	return salt, nil
+	return hex.DecodeString(encoded)
 }

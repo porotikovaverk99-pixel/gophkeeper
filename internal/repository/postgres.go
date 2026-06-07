@@ -3,15 +3,14 @@ package repository
 
 import (
 	"context"
+	"embed"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -19,6 +18,9 @@ import (
 
 	"github.com/porotikovaverk99-pixel/gophkeeper/internal/model"
 )
+
+//go:embed migrations/*.sql
+var migrationsFS embed.FS
 
 var (
 	// ErrUserNotFound возвращается, если пользователь не найден.
@@ -29,20 +31,7 @@ var (
 	ErrEntryNotFound = errors.New("entry not found")
 )
 
-// Storage описывает интерфейс хранилища GophKeeper.
-type Storage interface {
-	CreateUser(ctx context.Context, login, passwordHash string) (*model.User, error)
-	GetUserByLogin(ctx context.Context, login string) (*model.User, error)
-	GetUserByID(ctx context.Context, userID uuid.UUID) (*model.User, error)
-	CreateEntry(ctx context.Context, entry *model.Entry) error
-	UpdateEntry(ctx context.Context, entry *model.Entry) error
-	GetEntry(ctx context.Context, userID, entryID uuid.UUID) (*model.Entry, error)
-	ListEntries(ctx context.Context, userID uuid.UUID, since time.Time) ([]model.Entry, error)
-	DeleteEntry(ctx context.Context, userID, entryID uuid.UUID) error
-	Ping(ctx context.Context) error
-}
-
-// PostgresStorage реализует Storage поверх PostgreSQL.
+// PostgresStorage предоставляет доступ к данным GophKeeper в PostgreSQL.
 type PostgresStorage struct {
 	pool *pgxpool.Pool
 }
@@ -66,20 +55,12 @@ func NewPostgresStorage(dsn string) (*PostgresStorage, error) {
 }
 
 func runMigrations(dsn string) error {
-	exePath, err := os.Executable()
+	source, err := iofs.New(migrationsFS, "migrations")
 	if err != nil {
-		return fmt.Errorf("get executable path: %w", err)
+		return fmt.Errorf("create migration source: %w", err)
 	}
 
-	migrationsPath := filepath.Join(filepath.Dir(exePath), "migrations")
-	if _, err := os.Stat(migrationsPath); os.IsNotExist(err) {
-		migrationsPath = "migrations"
-		if _, err := os.Stat(migrationsPath); os.IsNotExist(err) {
-			return fmt.Errorf("migrations directory not found: %w", err)
-		}
-	}
-
-	m, err := migrate.New("file://"+migrationsPath, dsn)
+	m, err := migrate.NewWithSourceInstance("iofs", source, dsn)
 	if err != nil {
 		return fmt.Errorf("create migrate instance: %w", err)
 	}
@@ -258,13 +239,59 @@ func (s *PostgresStorage) ListEntries(ctx context.Context, userID uuid.UUID, sin
 
 // DeleteEntry помечает запись как удалённую.
 func (s *PostgresStorage) DeleteEntry(ctx context.Context, userID, entryID uuid.UUID) error {
-	entry, err := s.GetEntry(ctx, userID, entryID)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	entry := &model.Entry{}
+	err = tx.QueryRow(ctx,
+		`SELECT id, user_id, type, metadata, payload, version, created_at, updated_at, deleted
+		 FROM data_entries WHERE id = $1 AND user_id = $2
+		 FOR UPDATE`,
+		entryID, userID,
+	).Scan(
+		&entry.ID, &entry.UserID, &entry.Type, &entry.Metadata, &entry.Payload,
+		&entry.Version, &entry.CreatedAt, &entry.UpdatedAt, &entry.Deleted,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrEntryNotFound
+		}
+		return fmt.Errorf("get entry: %w", err)
 	}
 
 	entry.Deleted = true
-	return s.UpdateEntry(ctx, entry)
+	entry.UpdatedAt = time.Now().UTC()
+	entry.Version++
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE data_entries
+		 SET type = $1, metadata = $2, payload = $3, version = $4,
+		     updated_at = $5, deleted = $6
+		 WHERE id = $7 AND user_id = $8`,
+		entry.Type, entry.Metadata, entry.Payload, entry.Version,
+		entry.UpdatedAt, entry.Deleted, entry.ID, entry.UserID,
+	)
+	if err != nil {
+		return fmt.Errorf("update entry: %w", err)
+	}
+
+	if tag.RowsAffected() == 0 {
+		return ErrEntryNotFound
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+// Close закрывает пул соединений с PostgreSQL.
+func (s *PostgresStorage) Close() {
+	s.pool.Close()
 }
 
 // Ping проверяет доступность базы данных.

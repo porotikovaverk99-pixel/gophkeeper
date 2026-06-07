@@ -1,6 +1,9 @@
 package server
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -48,8 +51,8 @@ func (s *Server) Router() *chi.Mux {
 	return s.router
 }
 
-func (s *Server) Run() error {
-	server := &http.Server{
+func (s *Server) Run(ctx context.Context) error {
+	srv := &http.Server{
 		Addr:              s.addr,
 		Handler:           s.router,
 		ReadTimeout:       10 * time.Second,
@@ -58,5 +61,24 @@ func (s *Server) Run() error {
 		ReadHeaderTimeout: 2 * time.Second,
 	}
 
-	return server.ListenAndServe()
+	errCh := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("shutdown server: %w", err)
+		}
+
+		return nil
+	}
 }

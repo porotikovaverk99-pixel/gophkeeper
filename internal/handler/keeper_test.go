@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,39 +13,42 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
+	"go.uber.org/zap"
 
-	"github.com/porotikovaverk99-pixel/gophkeeper/internal/auth"
 	"github.com/porotikovaverk99-pixel/gophkeeper/internal/handler"
+	"github.com/porotikovaverk99-pixel/gophkeeper/internal/handler/mocks"
 	"github.com/porotikovaverk99-pixel/gophkeeper/internal/middleware"
 	"github.com/porotikovaverk99-pixel/gophkeeper/internal/model"
 	"github.com/porotikovaverk99-pixel/gophkeeper/internal/service"
 )
 
-func setupHandler() (*handler.KeeperHandler, *mockStorage, uuid.UUID) {
-	storage := newMockStorage()
-	authManager := auth.NewManager("secret", time.Hour)
-	svc := service.NewKeeperService(storage, authManager)
-	h := handler.NewKeeperHandler(svc)
-
-	user, err := storage.CreateUser(context.Background(), "alice", "hash")
-	if err != nil {
-		panic(err)
-	}
-
-	return h, storage, user.ID
+func newTestHandler(t *testing.T, svc handler.KeeperService) *handler.KeeperHandler {
+	t.Helper()
+	return handler.NewKeeperHandler(svc, zap.NewNop())
 }
 
 func withUserAndID(userID uuid.UUID, entryID string) (*http.Request, *httptest.ResponseRecorder) {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/data/"+entryID, nil)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", entryID)
-	req = req.WithContext(context.WithValue(middleware.WithUserID(context.Background(), userID), chi.RouteCtxKey, rctx))
+	req = req.WithContext(contextWithRoute(userID, rctx))
 	return req, httptest.NewRecorder()
 }
 
+func contextWithRoute(userID uuid.UUID, rctx *chi.Context) context.Context {
+	return context.WithValue(middleware.WithUserID(context.Background(), userID), chi.RouteCtxKey, rctx)
+}
+
 func TestRegisterAndLoginHandlers(t *testing.T) {
-	authManager := auth.NewManager("secret", time.Hour)
-	h := handler.NewKeeperHandler(service.NewKeeperService(newMockStorage(), authManager))
+	ctrl := gomock.NewController(t)
+	svc := mocks.NewMockKeeperService(ctrl)
+	user := &model.User{ID: uuid.New(), Login: "alice"}
+
+	svc.EXPECT().Register(gomock.Any(), "alice", "secret").Return("token-alice", user, nil)
+	svc.EXPECT().Login(gomock.Any(), "alice", "secret").Return("token-alice", user, nil)
+
+	h := newTestHandler(t, svc)
 
 	registerRec := httptest.NewRecorder()
 	h.Register(registerRec, httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewBufferString(`{"login":"alice","password":"secret"}`)))
@@ -56,7 +60,11 @@ func TestRegisterAndLoginHandlers(t *testing.T) {
 }
 
 func TestRegisterDuplicateUser(t *testing.T) {
-	h, _, _ := setupHandler()
+	ctrl := gomock.NewController(t)
+	svc := mocks.NewMockKeeperService(ctrl)
+	svc.EXPECT().Register(gomock.Any(), "alice", "secret").Return("", nil, service.ErrUserAlreadyExists)
+
+	h := newTestHandler(t, svc)
 
 	rec := httptest.NewRecorder()
 	h.Register(rec, httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewBufferString(`{"login":"alice","password":"secret"}`)))
@@ -64,7 +72,11 @@ func TestRegisterDuplicateUser(t *testing.T) {
 }
 
 func TestLoginInvalidCredentials(t *testing.T) {
-	h, _, _ := setupHandler()
+	ctrl := gomock.NewController(t)
+	svc := mocks.NewMockKeeperService(ctrl)
+	svc.EXPECT().Login(gomock.Any(), "alice", "wrong").Return("", nil, service.ErrInvalidCredentials)
+
+	h := newTestHandler(t, svc)
 
 	rec := httptest.NewRecorder()
 	h.Login(rec, httptest.NewRequest(http.MethodPost, "/api/v1/login", bytes.NewBufferString(`{"login":"alice","password":"wrong"}`)))
@@ -72,7 +84,23 @@ func TestLoginInvalidCredentials(t *testing.T) {
 }
 
 func TestCreateAndGetEntryHandlers(t *testing.T) {
-	h, _, userID := setupHandler()
+	ctrl := gomock.NewController(t)
+	svc := mocks.NewMockKeeperService(ctrl)
+	userID := uuid.New()
+	entryID := uuid.New()
+
+	svc.EXPECT().CreateEntry(gomock.Any(), userID, gomock.Any()).DoAndReturn(
+		func(_ context.Context, uid uuid.UUID, entry *model.Entry) error {
+			entry.ID = entryID
+			entry.UserID = uid
+			return nil
+		},
+	)
+	svc.EXPECT().GetEntry(gomock.Any(), userID, entryID).Return(&model.Entry{
+		ID: entryID, UserID: userID, Type: model.EntryTypeText, Metadata: "note", Payload: []byte("encrypted"),
+	}, nil)
+
+	h := newTestHandler(t, svc)
 
 	body, err := json.Marshal(map[string]any{
 		"type": model.EntryTypeText, "metadata": "note", "payload": []byte("encrypted"),
@@ -94,19 +122,28 @@ func TestCreateAndGetEntryHandlers(t *testing.T) {
 }
 
 func TestUpdateDeleteSyncAndPingHandlers(t *testing.T) {
-	h, storage, userID := setupHandler()
-
-	entry := &model.Entry{
-		ID: uuid.New(), UserID: userID, Type: model.EntryTypeText,
-		Metadata: "note", Payload: []byte("data"), Version: 1,
+	ctrl := gomock.NewController(t)
+	svc := mocks.NewMockKeeperService(ctrl)
+	userID := uuid.New()
+	entryID := uuid.New()
+	updatedEntry := &model.Entry{
+		ID: entryID, UserID: userID, Type: model.EntryTypeText,
+		Metadata: "updated", Payload: []byte("data2"), Version: 2,
 		UpdatedAt: time.Now().UTC(),
 	}
-	require.NoError(t, storage.CreateEntry(context.Background(), entry))
+
+	svc.EXPECT().UpdateEntry(gomock.Any(), userID, gomock.Any()).Return(nil)
+	svc.EXPECT().GetEntry(gomock.Any(), userID, entryID).Return(updatedEntry, nil)
+	svc.EXPECT().SyncEntries(gomock.Any(), userID, gomock.Any()).Return([]model.Entry{*updatedEntry}, nil)
+	svc.EXPECT().DeleteEntry(gomock.Any(), userID, entryID).Return(nil)
+	svc.EXPECT().Ping(gomock.Any()).Return(nil)
+
+	h := newTestHandler(t, svc)
 
 	updateBody, _ := json.Marshal(map[string]any{
-		"type": model.EntryTypeText, "metadata": "updated", "payload": []byte("data2"), "version": entry.Version,
+		"type": model.EntryTypeText, "metadata": "updated", "payload": []byte("data2"), "version": 1,
 	})
-	updateReq, updateRec := withUserAndID(userID, entry.ID.String())
+	updateReq, updateRec := withUserAndID(userID, entryID.String())
 	updateReq.Method = http.MethodPut
 	updateReq.Body = ioNopCloser(updateBody)
 	h.UpdateEntry(updateRec, updateReq)
@@ -119,7 +156,7 @@ func TestUpdateDeleteSyncAndPingHandlers(t *testing.T) {
 	h.SyncEntries(syncRec, syncReq)
 	require.Equal(t, http.StatusOK, syncRec.Code)
 
-	deleteReq, deleteRec := withUserAndID(userID, entry.ID.String())
+	deleteReq, deleteRec := withUserAndID(userID, entryID.String())
 	deleteReq.Method = http.MethodDelete
 	h.DeleteEntry(deleteRec, deleteReq)
 	require.Equal(t, http.StatusNoContent, deleteRec.Code)
@@ -130,10 +167,50 @@ func TestUpdateDeleteSyncAndPingHandlers(t *testing.T) {
 }
 
 func TestGetEntryNotFound(t *testing.T) {
-	h, _, userID := setupHandler()
-	req, rec := withUserAndID(userID, uuid.New().String())
+	ctrl := gomock.NewController(t)
+	svc := mocks.NewMockKeeperService(ctrl)
+	userID := uuid.New()
+	entryID := uuid.New()
+
+	svc.EXPECT().GetEntry(gomock.Any(), userID, entryID).Return(nil, service.ErrEntryNotFound)
+
+	h := newTestHandler(t, svc)
+	req, rec := withUserAndID(userID, entryID.String())
 	h.GetEntry(rec, req)
 	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestRegisterEmptyCredentials(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	svc := mocks.NewMockKeeperService(ctrl)
+	svc.EXPECT().Register(gomock.Any(), "", "").Return("", nil, service.ErrLoginPasswordRequired)
+
+	h := newTestHandler(t, svc)
+
+	rec := httptest.NewRecorder()
+	h.Register(rec, httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewBufferString(`{"login":"","password":""}`)))
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	var resp map[string]string
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Equal(t, "login and password are required", resp["error"])
+}
+
+func TestRegisterInternalErrorDoesNotLeakDetails(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	svc := mocks.NewMockKeeperService(ctrl)
+	svc.EXPECT().Register(gomock.Any(), "bob", "secret").Return("", nil, errors.New("db connection failed: secret-host"))
+
+	h := newTestHandler(t, svc)
+
+	rec := httptest.NewRecorder()
+	h.Register(rec, httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewBufferString(`{"login":"bob","password":"secret"}`)))
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	var resp map[string]string
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Equal(t, http.StatusText(http.StatusInternalServerError), resp["error"])
+	require.NotContains(t, resp["error"], "secret-host")
 }
 
 func TestJSONError(t *testing.T) {

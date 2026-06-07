@@ -1,84 +1,72 @@
 package logger
 
 import (
-    "net/http"
-    "go.uber.org/zap"
-    "time"
+	"net/http"
+	"time"
+
+	"go.uber.org/zap"
 )
 
-var Log *zap.Logger = zap.NewNop()
-
 type (
-    responseData struct {
-        status int
-        size int
-    }
+	responseData struct {
+		status int
+		size   int
+	}
 
-    loggingResponseWriter struct {
-        http.ResponseWriter
-        responseData *responseData
-    }
+	loggingResponseWriter struct {
+		http.ResponseWriter
+		responseData *responseData
+	}
 )
 
 func (r *loggingResponseWriter) WriteHeader(statusCode int) {
-    r.ResponseWriter.WriteHeader(statusCode) 
-    r.responseData.status = statusCode
+	r.ResponseWriter.WriteHeader(statusCode)
+	r.responseData.status = statusCode
 }
 
 func (r *loggingResponseWriter) Write(b []byte) (int, error) {
-    size, err := r.ResponseWriter.Write(b) 
-    r.responseData.size += size
-    return size, err
+	size, err := r.ResponseWriter.Write(b)
+	r.responseData.size += size
+	return size, err
 }
 
-func Initialize(level string) error {
+// New создаёт zap.Logger с указанным уровнем логирования.
+func New(level string) (*zap.Logger, error) {
+	lvl, err := zap.ParseAtomicLevel(level)
+	if err != nil {
+		return nil, err
+	}
 
-    lvl, err := zap.ParseAtomicLevel(level)
-    if err != nil {
-        return err
-    }
+	cfg := zap.NewProductionConfig()
+	cfg.Level = lvl
 
-    cfg := zap.NewProductionConfig()
-    cfg.Level = lvl
-
-    zl, err := cfg.Build()
-    if err != nil {
-        return err
-    }
-
-    Log = zl
-    return nil
-
+	return cfg.Build()
 }
 
-func RequestLogger(h http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// RequestLogger логирует HTTP-запросы.
+func RequestLogger(log *zap.Logger, h http.Handler) http.Handler {
+	log = log.With(zap.String("component", "http"))
 
-        uri := r.RequestURI
-        method := r.Method
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		responseData := &responseData{
+			status: 0,
+			size:   0,
+		}
 
-        responseData := &responseData {
-            status: 0,
-            size: 0,
-        }
+		lw := &loggingResponseWriter{
+			ResponseWriter: w,
+			responseData:   responseData,
+		}
 
-        lw := &loggingResponseWriter{
-            ResponseWriter: w,
-            responseData: responseData,
-        }
+		start := time.Now()
+		h.ServeHTTP(lw, r)
 
-        start := time.Now()
-
-        h.ServeHTTP(lw, r)
-
-        duration := time.Since(start)
-
-        Log.Info("HTTP request", 
-            zap.String("uri", uri), 
-            zap.String("method", method),
-            zap.Duration("duration", duration),
-            zap.Int("status", responseData.status),
-            zap.Int("size", responseData.size),
-        )
-    })
+		log.Info("HTTP request",
+			zap.String("uri", r.RequestURI),
+			zap.String("method", r.Method),
+			zap.Duration("duration", time.Since(start)),
+			zap.Int("status", responseData.status),
+			zap.Int("size", responseData.size),
+		)
+	})
 }

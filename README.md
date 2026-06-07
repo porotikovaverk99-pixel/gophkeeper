@@ -14,7 +14,7 @@
 - `cmd/gophkeeper-client` — CLI на cobra
 - `pkg/vault` — шифрование (PBKDF2 + AES-GCM)
 - `pkg/storage` — локальный кеш в `~/.gophkeeper/vault.json`
-- `migrations/` — SQL-миграции, накатываются при старте сервера
+- `internal/repository/migrations/` — SQL-миграции, встроены в бинарник сервера через `go:embed`
 
 ## Запуск
 

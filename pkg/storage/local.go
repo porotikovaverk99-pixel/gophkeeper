@@ -67,8 +67,49 @@ func (s *LocalStorage) Save() error {
 		return fmt.Errorf("marshal storage: %w", err)
 	}
 
-	if err := os.WriteFile(s.path, data, 0o600); err != nil {
+	if err := writeFileAtomic(s.path, data, 0o600); err != nil {
 		return fmt.Errorf("write storage: %w", err)
+	}
+
+	return nil
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}
+
+	if _, err := tmp.Write(data); err != nil {
+		cleanup()
+		return fmt.Errorf("write temp file: %w", err)
+	}
+
+	if err := tmp.Chmod(perm); err != nil {
+		cleanup()
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+
+	if err := tmp.Sync(); err != nil {
+		cleanup()
+		return fmt.Errorf("sync temp file: %w", err)
+	}
+
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("close temp file: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("rename temp file: %w", err)
 	}
 
 	return nil

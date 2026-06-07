@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
 	"github.com/porotikovaverk99-pixel/gophkeeper/internal/auth"
 	"github.com/porotikovaverk99-pixel/gophkeeper/internal/handler"
@@ -110,7 +111,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *api.Client) {
 	t.Helper()
 
 	authManager := auth.NewManager("secret", time.Hour)
-	h := handler.NewKeeperHandler(service.NewKeeperService(newMockStorage(), authManager))
+	h := handler.NewKeeperHandler(service.NewKeeperService(newMockStorage(), authManager), zap.NewNop())
 
 	router := chi.NewRouter()
 	router.Post("/api/v1/register", h.Register)
