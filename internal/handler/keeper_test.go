@@ -213,6 +213,64 @@ func TestRegisterInternalErrorDoesNotLeakDetails(t *testing.T) {
 	require.NotContains(t, resp["error"], "secret-host")
 }
 
+func TestUnauthorizedHandlers(t *testing.T) {
+	h := newTestHandler(t, mocks.NewMockKeeperService(gomock.NewController(t)))
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		call   func(*handler.KeeperHandler, *httptest.ResponseRecorder, *http.Request)
+	}{
+		{
+			name: "create entry", method: http.MethodPost, path: "/api/v1/data",
+			call: func(h *handler.KeeperHandler, rec *httptest.ResponseRecorder, req *http.Request) {
+				h.CreateEntry(rec, req)
+			},
+		},
+		{
+			name: "get entry", method: http.MethodGet, path: "/api/v1/data/" + uuid.New().String(),
+			call: func(h *handler.KeeperHandler, rec *httptest.ResponseRecorder, req *http.Request) {
+				h.GetEntry(rec, req)
+			},
+		},
+		{
+			name: "sync entries", method: http.MethodPost, path: "/api/v1/sync",
+			call: func(h *handler.KeeperHandler, rec *httptest.ResponseRecorder, req *http.Request) {
+				h.SyncEntries(rec, req)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(tt.method, tt.path, http.NoBody)
+			tt.call(h, rec, req)
+			require.Equal(t, http.StatusUnauthorized, rec.Code)
+		})
+	}
+}
+
+func TestRegisterInvalidBody(t *testing.T) {
+	h := newTestHandler(t, mocks.NewMockKeeperService(gomock.NewController(t)))
+
+	rec := httptest.NewRecorder()
+	h.Register(rec, httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewBufferString(`not-json`)))
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestPingInternalError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	svc := mocks.NewMockKeeperService(ctrl)
+	svc.EXPECT().Ping(gomock.Any()).Return(errors.New("db unavailable"))
+
+	h := newTestHandler(t, svc)
+	rec := httptest.NewRecorder()
+	h.Ping(rec, httptest.NewRequest(http.MethodGet, "/ping", nil))
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
 func TestJSONError(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.JSONError(rec, "boom", http.StatusTeapot)
