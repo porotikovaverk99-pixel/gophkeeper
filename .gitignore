@@ -1,0 +1,30 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.out
+
+# Build artifacts
+/bin/
+/gophkeeper-client
+/gophkeeper-server
+
+# Old template artifacts
+iter10_changes.patch
+go
+
+# Dependency directories
+vendor/
+
+# IDEs
+.idea
+.vscode
+.vs/

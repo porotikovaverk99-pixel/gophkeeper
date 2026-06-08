@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS data_entries;
+DROP TABLE IF EXISTS users;
